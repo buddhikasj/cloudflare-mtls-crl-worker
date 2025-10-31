@@ -1,4 +1,4 @@
-# der-to-pem-worker
+# CRL-worker
 
 A Cloudflare Worker that forwards requests while extracting CRL Distribution Point URLs from the presented mTLS client certificate, checks revocation via cached CRLs in Workers KV, and applies simple pass-through logic based on the request host.
 
@@ -23,11 +23,11 @@ A Cloudflare Worker that forwards requests while extracting CRL Distribution Poi
 - Ensure Wrangler is configured for your Cloudflare account and the KV namespace is created/bound as in `wrangler.toml`.
 
 ```bash
-# from worker/der_to_pem/
+# from worker/crl_worker/
 npm install
 npm run deploy
 # or
-wrangler deploy
+npx wrangler deploy
 ```
 
 ## Create the KV namespace
