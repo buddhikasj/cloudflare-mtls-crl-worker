@@ -53,9 +53,9 @@ id = "<YOUR_KV_NAMESPACE_ID>"
 - Add routes so traffic for your hostname is handled by this Worker. Replace with your own `zone_id` and host.
 
 ```toml
-routes = [
-  { pattern = "<URI_PATH>", zone_id = "<YOUR_ZONE_ID>" }
-]
+[[routes]]
+pattern = "<URI_PATH>"
+zone_name = "<ZONE_ID>"
 ```
 
 - Ports are not part of route patterns; route by hostname/path only.
