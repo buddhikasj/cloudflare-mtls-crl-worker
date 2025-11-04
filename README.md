@@ -68,3 +68,14 @@ zone_name = "<ZONE_ID>"
 - **Input**: `cf-client-cert-der-base64`
 - **Optional**: `FORCE_CRL_REFRESH_HEADER` (enable in code if desired)
 - **Output**: `X-Client-Cert-CRL-URLs` (comma-separated list)
+
+## Error status codes
+- **560**: `client CN allowlist not configured` in `verifyClientCNAgainstAllowlist()` when no allowlist map exists for `host`.
+- **561**: `client certificate not allowed` when the extracted CN is not present/true in the allowlist.
+- **562**: `Certificate has been revoked` when the client certificate serial is found in a loaded CRL.
+- **563**: `failed to load CRL from any distribution point` when none of the CRLs could be fetched/loaded.
+- **564**: `Certificate Verifications failed` generic fallback when verification preconditions are not met.
+
+
+
+

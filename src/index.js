@@ -78,27 +78,104 @@ export default {
     }
   }
 
-  function extractCNFromDN(dn) {
-    if (!dn || typeof dn !== 'string') return null
-    const m = dn.match(/(?:^|,\s*)CN=([^,]+)(?:,|$)/i)
-    return m ? m[1] : null
+// Handles optional CRL refresh header, extracts CRL Distribution Points, and evaluates revocation.
+// Returns a Response on failure or null to continue.
+async function performCRLChecks(ctx, env, request, headers, cert) {
+  // Optional header that will force the worker to get an updated CRL list
+  const FORCE_CRL_REFRESH_HEADER = 'force-crl-refresh'
+  // Check to see if we were asked to force a CRL refresh
+  const forceCRLRefresh = request.headers.get(FORCE_CRL_REFRESH_HEADER)
+    ? true
+    : false
+
+  // Extract CRL Distribution Points
+  let crlDistPoints = extractCRLDistributionPoints(cert)
+  
+  // console.log('X-Client-Cert-CRL-URLs:', crlDistPoints)
+
+  // Add CRL Distribution Points header if found
+  if (crlDistPoints && Array.isArray(crlDistPoints) && crlDistPoints.length > 0) {
+    headers.set('X-Client-Cert-CRL-URLs', crlDistPoints.join(','))
+    console.log('CRL URLs added to header:', crlDistPoints.join(','))
+  } else {
+    console.log('No CRL Distribution Points found in certificate')
   }
-
-
-   
-  // Function that converts the base64 encoded DER certificate to PEM format
-  function toPem(base64) {
-    let pem = '-----BEGIN CERTIFICATE-----\n'
-    // Add a new line after every 64 characters
-    for (let i = 0; i < base64.length; i += 64) {
-      pem += base64.slice(i, i + 64) + '\n'
+  
+  // Iterate over all CRL distribution points and evaluate revocation
+  let loadedAnyCRL = false
+  for (const dp of crlDistPoints) {
+    const CRL_KV_KEY = `CRL_${btoa(dp)}` 
+    const CRL_URL = dp
+    try {
+      const crl = await loadCRL(ctx, env, CRL_URL, CRL_KV_KEY, false)
+      if (crl) {
+        loadedAnyCRL = true
+        // Check if the certificate the user presented is in this CRL
+        if (crl.revokedSerialNumbers && crl.revokedSerialNumbers[request.cf.tlsClientAuth.certSerial]) {
+          console.log('Certificate has been revoked', request.cf.tlsClientAuth.certSerial)
+          return new Response('Certificate has been revoked', { status: 562 })
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load CRL from distribution point:', CRL_URL, e)
+      // Continue to next distribution point
     }
-    pem += '-----END CERTIFICATE-----\n'
-    // I do not think escape(pem) actually does anything
-    return pem
   }
 
-  /**
+  // If none of the CRLs could be loaded, fail closed
+  if (!loadedAnyCRL) {
+    console.log('failed to load CRL from any distribution point')
+    return new Response('failed to load CRL from any distribution point', { status: 563 })
+  }
+
+  return null
+}
+
+// Verifies the client's CN against the per-host allowlist in KV.
+// Returns a Response on failure (403) or null on success.
+async function verifyClientCNAgainstAllowlist(env, request, headers, host, clientCN) {
+  // KV namespace storing CN whitelist for each host
+  const WL_KEY = `CN_WL_${btoa(host)}`
+
+  // console.log('Checking CN whitelist')
+  // Get the client CN allowlist from workers kv
+  const clientCNAllowlistMap = await loadCNWhitelist(env, host)
+  // console.log('clientCNAllowlistMap', JSON.stringify(clientCNAllowlistMap))
+
+  // Fail closed if no allowlist configured for this host
+  if (!clientCNAllowlistMap || typeof clientCNAllowlistMap !== 'object') {
+    console.log('client CN allowlist not configured', clientCN)
+    return new Response('client CN allowlist not configured', { status: 560 })
+  }
+
+  // Fail closed if the client CN is not in the allowlist
+  if (!clientCN || clientCNAllowlistMap[clientCN] !== true) {
+    console.log('client certificate not allowed', clientCN)
+    return new Response('client certificate not allowed', { status: 561 })
+  }
+
+  return null
+}
+
+function extractCNFromDN(dn) {
+  if (!dn || typeof dn !== 'string') return null
+  const m = dn.match(/(?:^|,\s*)CN=([^,]+)(?:,|$)/i)
+  return m ? m[1] : null
+}
+
+// Function that converts the base64 encoded DER certificate to PEM format
+function toPem(base64) {
+  let pem = '-----BEGIN CERTIFICATE-----\n'
+  // Add a new line after every 64 characters
+  for (let i = 0; i < base64.length; i += 64) {
+    pem += base64.slice(i, i + 64) + '\n'
+  }
+  pem += '-----END CERTIFICATE-----\n'
+  // I do not think escape(pem) actually does anything
+  return pem
+}
+
+/**
  * Helper function that converts a buffer to a hex string
  * @param {*} inputBuffer
  */
@@ -141,7 +218,6 @@ async function updateCRL(env, crlUrl, crlKvKey) {
   throw new Error(`failed to fetch crl with status ${crlResp.status}`)
 }
 
-
 async function loadCRL(ctx, env, crlUrl, crlKvKey, forceCRLRefresh = false) {
   // Force a refresh of the CRL list if needed
   if (forceCRLRefresh) {
@@ -166,7 +242,6 @@ async function loadCRL(ctx, env, crlUrl, crlKvKey, forceCRLRefresh = false) {
   return crl
 }
 
-
 // Helper to build the CN whitelist KV key for a given host header (may include port)
 function cnWhitelistKeyForHost(hostHeader) {
   return `CN_WL_${btoa(hostHeader)}`
@@ -181,7 +256,6 @@ async function loadCNWhitelist(env, hostHeader) {
   }
   return entry.common_names
 }
-
 
 // Checks the request host against env.MTLS_HOST and optionally passes through.
 // Returns an object { host, response } where response is a Response or null.
@@ -198,25 +272,19 @@ async function hostGateOrPassThrough(request, env, headers) {
   return { host, response: null }
 }
 
-
-  // Function that handle the request
-  async function handleRequest(request, env, ctx) {
-
-    if (
-      request.cf &&
-      request.cf.tlsClientAuth &&
-      request.cf.tlsClientAuth.certPresented &&
-      request.cf.tlsClientAuth.certVerified === 'SUCCESS'
-    ) {
-    
+// Function that handle the request
+async function handleRequest(request, env, ctx) {
+  if (
+    request.cf &&
+    request.cf.tlsClientAuth &&
+    request.cf.tlsClientAuth.certPresented &&
+    request.cf.tlsClientAuth.certVerified === 'SUCCESS'
+  ) {
     // Create a headers object from the request headers
     let headers = new Headers(request.headers)
-    
+
     const { host, response } = await hostGateOrPassThrough(request, env, headers)
-    if (response) return response  
-    
-    // KV namespace storing CN whitelist for each host
-    const WL_KEY = `CN_WL_${btoa(host)}`;
+    if (response) return response
 
     // Extract the client certificate common name and set it as a header
     const subjectDN = request.cf.tlsClientAuth.certSubjectDN
@@ -227,84 +295,32 @@ async function hostGateOrPassThrough(request, env, headers) {
       headers.set('X-Client-CN', clientCN)
     }
 
-    
-    // Get the client CN allowlist from workers kv
-    const clientCNAllowlistMap = await loadCNWhitelist(env, host);
-    
-
-    // Fail closed if no allowlist configured for this host
-    if (!clientCNAllowlistMap || typeof clientCNAllowlistMap !== 'object') {
-      return new Response('client CN allowlist not configured', { status: 403 });
+    if (env.ENABLE_CN_WHITELIST === 'true') {
+      const cnCheckResponse = await verifyClientCNAgainstAllowlist(env, request, headers, host, clientCN)
+      if (cnCheckResponse) return cnCheckResponse
     }
 
-    // Fail closed if the client CN is not in the allowlist
-    if (!clientCN || clientCNAllowlistMap[clientCN] !== true) {
-      return new Response('client certificate not allowed', { status: 403 });
-    }
-    
-
-    // Optional header that will force the worker to get an updated CRL list
-    const FORCE_CRL_REFRESH_HEADER = 'force-crl-refresh'
-    // Check to see if we were asked to force a CRL refresh
-    const forceCRLRefresh = request.headers.get(FORCE_CRL_REFRESH_HEADER)
-      ? true
-      : false
 
 
     // Get the base64 encoded DER certificate and subject
     let cert = headers.get('cf-client-cert-der-base64')
-
-    // // Convert the base64 encoded DER certificate to PEM format
-    // let pem = toPem(cert)
-    // headers.set('X-Forwarded-Client-Cert', btoa(pem))
-
-
-    // Extract CRL Distribution Points
-    let crlDistPoints = extractCRLDistributionPoints(cert)
     
-    // console.log('X-Client-Cert-CRL-URLs:', crlDistPoints)
-
-    // Add CRL Distribution Points header if found
-    if (crlDistPoints && Array.isArray(crlDistPoints) && crlDistPoints.length > 0) {
-      headers.set('X-Client-Cert-CRL-URLs', crlDistPoints.join(','))
-      console.log('CRL URLs added to header:', crlDistPoints.join(','))
-    } else {
-      console.log('No CRL Distribution Points found in certificate')
-    }
     
-    // Iterate over all CRL distribution points and evaluate revocation
-    let loadedAnyCRL = false
-    for (const dp of crlDistPoints) {
-      const CRL_KV_KEY = `CRL_${btoa(dp)}`
-      const CRL_URL = dp
-      try {
-        const crl = await loadCRL(ctx, env, CRL_URL, CRL_KV_KEY, false)
-        if (crl) {
-          loadedAnyCRL = true
-          // Check if the certificate the user presented is in this CRL
-          if (crl.revokedSerialNumbers && crl.revokedSerialNumbers[request.cf.tlsClientAuth.certSerial]) {
-            return new Response('Certificate has been revoked', { status: 403 })
-          }
-        }
-      } catch (e) {
-        console.error('Failed to load CRL from distribution point:', CRL_URL, e)
-        // Continue to next distribution point
-      }
-    }
 
-    // If none of the CRLs could be loaded, fail closed
-    if (!loadedAnyCRL) {
-      return new Response('failed to load CRL from any distribution point', { status: 500 })
+
+    if (env.ENABLE_CRL_CHECK === 'true') {
+      const crlResponse = await performCRLChecks(ctx, env, request, headers, cert)
+      if (crlResponse) return crlResponse
     }
 
     // Clone the request with the updated headers
     let requestClone = new Request(request, { headers: headers })
     // Fetch the request
     return fetch(requestClone)
-    }
+  }
 
     else {
-      return new Response('Certificate Verifications failed ', { status: 403 })
+  return new Response('Certificate Verifications failed ', { status: 564 })
     }
 
-  }
+}

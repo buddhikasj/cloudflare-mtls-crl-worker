@@ -17,9 +17,11 @@ enabled = true
 
 [[routes]]
 pattern = "<URI_PATH>"
-zone_name = "<ZONE_ID>"
+zone_name = "<ZONE_Name>"
 
 
 
 [vars]
 MTLS_HOST = "spectrum.buddhikacf.cloud:4046"
+ENABLE_CN_WHITELIST = "true"
+ENABLE_CRL_CHECK = "true"
