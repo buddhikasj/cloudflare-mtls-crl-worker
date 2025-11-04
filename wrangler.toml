@@ -4,9 +4,11 @@ compatibility_date = "2024-09-01"
 
 
 
-[[kv_namespaces]]
-binding = "CRL_NAMESPACE"
-id = "<YOUR_KV_NAMESPACE_ID>"
+kv_namespaces = [
+  { binding = "CRL_NAMESPACE", id = "<YOUR_KV_NAMESPACE_ID>" },
+  { binding = "CN_WHITELIST", id = "<YOUR_KV_NAMESPACE_ID>" }
+]
+
 
 
 [observability]
@@ -16,3 +18,8 @@ enabled = true
 [[routes]]
 pattern = "<URI_PATH>"
 zone_name = "<ZONE_ID>"
+
+
+
+[vars]
+MTLS_HOST = "spectrum.buddhikacf.cloud:4046"
