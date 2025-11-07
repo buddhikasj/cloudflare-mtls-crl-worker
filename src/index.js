@@ -49,8 +49,13 @@ export default {
         if (obj.idBlock && obj.idBlock.tagNumber === 6) {
           try {
             const url = String.fromCharCode.apply(null, new Uint8Array(obj.valueBlock.valueHex))
-            console.log('Found CRL URL:', url)
-            urls.push(url)
+            if (/^https?:\/\//i.test(url)) {
+              console.log('Found CRL URL:', url)
+              urls.push(url)
+            }
+            else{
+              console.log('Found non-HTTP CRL URL:', url)
+            }
           } catch (e) {
             console.error('Error decoding URI:', e)
           }
@@ -122,10 +127,10 @@ async function performCRLChecks(ctx, env, request, headers, cert) {
     }
   }
 
-  // If none of the CRLs could be loaded, fail closed
+  // If none of the CRLs could be loaded, fail open (allow request to proceed)
   if (!loadedAnyCRL) {
-    console.log('failed to load CRL from any distribution point')
-    return new Response('failed to load CRL from any distribution point', { status: 563 })
+    console.log('failed to load CRL from any distribution point - failing open')
+    return null
   }
 
   return null
@@ -193,32 +198,145 @@ function bufToHex(inputBuffer) {
  * Fetchs a CRL list, parses out the serial numbers, and stores them into workers kv
  */
 async function updateCRL(env, crlUrl, crlKvKey) {
-  const crlResp = await fetch(crlUrl)
-  if (crlResp.status == 200) {
-    const buf = await crlResp.arrayBuffer()
+  console.log('Updating CRL', CRL_URL)
+  const crlResp = await fetch(CRL_URL)
+  if (crlResp.status !== 200) {
+    throw new Error(`failed to fetch crl with status ${crlResp.status}`)
+  }
+
+  const buf = await crlResp.arrayBuffer()
+  console.log('Fetched CRL', { bytes: buf.byteLength })
+
+  let nextUpdate, thisUpdate, revokedSerialNumbers
+
+  // Try PKI.js CertificateRevocationList.fromBER() first
+  try {
+    // const crlObject = CertificateRevocationList.fromBER(buf)
+
+        // const buf = await crlResp.arrayBuffer()
     const asn1 = asn1js.fromBER(buf)
-    const crlSimpl = new CertificateRevocationList({
+    const crlObject = new CertificateRevocationList({
       schema: asn1.result,
     })
-    const newCRL = {
-      nextUpdate: crlSimpl.nextUpdate.value,
-      thisUpdate: crlSimpl.thisUpdate.value,
-      revokedSerialNumbers: crlSimpl.revokedCertificates.reduce(
-        (revokedSerialNums, cert) => {
-          let serialNum = bufToHex(cert.userCertificate.valueBlock.valueHex)
-          revokedSerialNums[serialNum] = true
-          return revokedSerialNums
-        },
-        {},
-      ),
+    console.log('CRL parsed with PKI.js fromBER()')
+    
+    nextUpdate = crlObject.nextUpdate?.value || null
+    thisUpdate = crlObject.thisUpdate?.value || null
+    
+    const revoked = Array.isArray(crlObject.revokedCertificates) ? crlObject.revokedCertificates : []
+    revokedSerialNumbers = revoked.reduce((acc, cert) => {
+      try {
+        const serial = bufToHex(cert.userCertificate.valueBlock.valueHex)
+        acc[serial] = true
+      } catch (_) {}
+      return acc
+    }, {})
+    
+    console.log('CRL loaded via PKI.js', { 
+      revokedCount: Object.keys(revokedSerialNumbers).length 
+    })
+    
+  } catch (e) {
+    console.log('PKI.js CRL parsing failed, using manual ASN.1 parsing:', e.message)
+    
+    // Fallback: Manual ASN.1 parsing
+    const asn1 = asn1js.fromBER(buf)
+    if (asn1.offset === -1 || !asn1.result) {
+      throw new Error('Failed to parse CRL ASN.1')
     }
-    await env.CRL_NAMESPACE.put(crlKvKey, JSON.stringify(newCRL))
-    return newCRL
+    
+    const crlSeq = asn1.result
+    if (!crlSeq.valueBlock?.value?.[0]) {
+      throw new Error('Invalid CRL structure')
+    }
+
+    const tbsCertList = crlSeq.valueBlock.value[0]
+    const tbsFields = tbsCertList.valueBlock?.value || []
+    
+    console.log('Manual parsing - fields:', tbsFields.length)
+    
+    // Debug: Log all field types
+    for (let i = 0; i < tbsFields.length; i++) {
+      const f = tbsFields[i]
+      console.log(`Field[${i}]:`, {
+        tagClass: f?.idBlock?.tagClass,
+        tagNumber: f?.idBlock?.tagNumber,
+        type: f?.constructor?.name,
+        hasValue: !!f?.value,
+        hasValueBlock: !!f?.valueBlock
+      })
+    }
+    
+    let idx = 0
+    
+    // Field[0]: Version (INTEGER) - always present in v2 CRLs
+    if (tbsFields[idx]?.idBlock?.tagNumber === 2) {
+      console.log('Skipping version at', idx)
+      idx++
+    }
+    
+    // Field[1]: Signature algorithm (SEQUENCE)
+    console.log('Signature algorithm at', idx, '- tag:', tbsFields[idx]?.idBlock?.tagNumber)
+    idx++
+    
+    // Field[2]: Issuer (SEQUENCE)
+    console.log('Issuer at', idx, '- tag:', tbsFields[idx]?.idBlock?.tagNumber)
+    idx++
+    
+    // Field[3]: thisUpdate (UTCTime or GeneralizedTime)
+    const thisUpdateField = tbsFields[idx]
+    thisUpdate = thisUpdateField?.toDate?.() || thisUpdateField?.valueBlock?.value?.[0] || null
+    idx++
+    
+    // Field[4]: nextUpdate (UTCTime or GeneralizedTime, optional)
+    if (idx < tbsFields.length && (tbsFields[idx]?.idBlock?.tagNumber === 23 || tbsFields[idx]?.idBlock?.tagNumber === 24)) {
+      const nextUpdateField = tbsFields[idx]
+      nextUpdate = nextUpdateField?.toDate?.() || nextUpdateField?.valueBlock?.value?.[0] || null
+      idx++
+    } else {
+      nextUpdate = null
+    }
+    
+    // revokedCertificates (optional SEQUENCE)
+    console.log('Checking revokedCerts at', idx, '- tag:', tbsFields[idx]?.idBlock?.tagNumber)
+    revokedSerialNumbers = {}
+    if (idx < tbsFields.length && tbsFields[idx]?.idBlock?.tagNumber === 16) {
+      const revokedCerts = tbsFields[idx]?.valueBlock?.value || []
+      console.log('Found revoked certs:', revokedCerts.length)
+      
+      revokedCerts.forEach((certSeq, i) => {
+        try {
+          const serialField = certSeq.valueBlock?.value?.[0]
+          if (serialField?.valueBlock?.valueHex) {
+            const serial = bufToHex(serialField.valueBlock.valueHex)
+            revokedSerialNumbers[serial] = true
+            if (i < 3) console.log(`Revoked[${i}]:`, serial)
+          }
+        } catch (err) {
+          console.log('Error extracting serial:', err.message)
+        }
+      })
+    } else {
+      console.log('No revoked certificates SEQUENCE found at', idx)
+    }
+
+    console.log('Manual parsing complete:', {
+      revokedCount: Object.keys(revokedSerialNumbers).length
+    })
   }
-  throw new Error(`failed to fetch crl with status ${crlResp.status}`)
+
+  const newCRL = {
+    next_update: nextUpdate,
+    this_update: thisUpdate,
+    revokedSerialNumbers,
+  }
+  
+  await CRL_NAMESPACE.put(CRL_KV_KEY, JSON.stringify(newCRL))
+  return newCRL
 }
 
 async function loadCRL(ctx, env, crlUrl, crlKvKey, forceCRLRefresh = false) {
+  console.log('Loading CRL', { url: crlUrl, kvKey: crlKvKey })
   // Force a refresh of the CRL list if needed
   if (forceCRLRefresh) {
     return await updateCRL(env, crlUrl, crlKvKey)
@@ -309,8 +427,17 @@ async function handleRequest(request, env, ctx) {
 
 
     if (env.ENABLE_CRL_CHECK === 'true') {
-      const crlResponse = await performCRLChecks(ctx, env, request, headers, cert)
-      if (crlResponse) return crlResponse
+      try {
+        const crlResponse = await performCRLChecks(ctx, env, request, headers, cert)
+        if (crlResponse) return crlResponse
+      } catch (e) {
+        console.error('CRL check failed:', e)
+        
+        // Fail Open if CRL check fails
+        let requestClone = new Request(request, { headers: headers })
+        // Fetch the request
+        return fetch(requestClone)
+      }
     }
 
     // Clone the request with the updated headers
