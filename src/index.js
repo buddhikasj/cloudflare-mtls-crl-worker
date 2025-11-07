@@ -331,7 +331,7 @@ async function updateCRL(env, CRL_URL, CRL_KV_KEY) {
     revokedSerialNumbers,
   }
   
-  await CRL_NAMESPACE.put(CRL_KV_KEY, JSON.stringify(newCRL))
+  await env.CRL_NAMESPACE.put(CRL_KV_KEY, JSON.stringify(newCRL))
   return newCRL
 }
 
