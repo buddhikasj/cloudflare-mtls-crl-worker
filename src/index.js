@@ -197,7 +197,7 @@ function bufToHex(inputBuffer) {
 /**
  * Fetchs a CRL list, parses out the serial numbers, and stores them into workers kv
  */
-async function updateCRL(env, crlUrl, crlKvKey) {
+async function updateCRL(env, CRL_URL, CRL_KV_KEY) {
   console.log('Updating CRL', CRL_URL)
   const crlResp = await fetch(CRL_URL)
   if (crlResp.status !== 200) {
