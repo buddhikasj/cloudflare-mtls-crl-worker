@@ -446,8 +446,9 @@ async function handleRequest(request, env, ctx) {
     return fetch(requestClone)
   }
 
-  //   else {
+    else {
   // return new Response('Certificate Verifications failed ', { status: 564 })
-  //   }
+      return fetch(request)
+    }
 
 }
