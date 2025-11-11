@@ -436,19 +436,19 @@ async function handleRequest(request, env, ctx) {
         // Fail Open if CRL check fails
         let requestClone = new Request(request, { headers: headers })
         // Fetch the request
-        return fetch(requestClone)
+        return await fetch(requestClone)
       }
     }
 
     // Clone the request with the updated headers
     let requestClone = new Request(request, { headers: headers })
     // Fetch the request
-    return fetch(requestClone)
+    return await fetch(requestClone)
   }
 
     else {
   // return new Response('Certificate Verifications failed ', { status: 564 })
-      return fetch(request)
+      return await fetch(request)
     }
 
 }
