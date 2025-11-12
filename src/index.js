@@ -207,6 +207,13 @@ async function updateCRL(env, CRL_URL, CRL_KV_KEY) {
   const buf = await crlResp.arrayBuffer()
   console.log('Fetched CRL', { bytes: buf.byteLength })
 
+  // Check if CRL is larger than 5 MB
+  const MAX_CRL_SIZE = 5 * 1024 * 1024 // 5 MB in bytes
+  if (buf.byteLength > MAX_CRL_SIZE) {
+    console.log(`⚠️ CRL too large to parse: ${buf.byteLength} bytes (${(buf.byteLength / 1024 / 1024).toFixed(2)} MB) - Skipping parsing for: ${CRL_URL}`)
+    return
+  }
+
   let nextUpdate, thisUpdate, revokedSerialNumbers
 
   // Try PKI.js CertificateRevocationList.fromBER() first
